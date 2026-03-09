@@ -1,0 +1,187 @@
+# 股票实时分析应用 核心代码
+import streamlit as st
+import akshare as ak
+import pandas as pd
+import warnings
+warnings.filterwarnings("ignore")
+
+# 页面配置
+st.set_page_config(page_title="股票实时分析工具", page_icon="📈", layout="wide")
+st.title("📈 A股实时分析工具")
+st.caption("输入股票代码，一键获取实时行情、操作建议、止盈止损点位，仅供参考，不构成投资建议")
+
+# 代码自动补全处理
+def format_stock_code(code):
+    code = code.strip()
+    if code.startswith("6"):
+        return f"sh{code}"
+    elif code.startswith(("0", "3")):
+        return f"sz{code}"
+    else:
+        return code
+
+# 核心分析函数
+def get_stock_analysis(code):
+    try:
+        # 1. 获取实时行情数据
+        spot_df = ak.stock_zh_a_spot_em()
+        stock_info = spot_df[spot_df["代码"] == code].iloc[0]
+        stock_name = stock_info["名称"]
+        latest_price = stock_info["最新价"]
+        change_percent = stock_info["涨跌幅"]
+        turnover_rate = stock_info["换手率"]
+        volume = stock_info["成交量"]
+        amount = stock_info["成交额"]
+        high = stock_info["最高"]
+        low = stock_info["最低"]
+        code_full = format_stock_code(code)
+
+        # 2. 获取K线数据计算支撑压力、均线
+        kline_df = ak.stock_zh_a_hist(symbol=code, period="daily", start_date="20240101", adjust="qfq")
+        kline_df = kline_df.sort_values("日期", ascending=False).head(60)  # 近60个交易日
+        close_series = kline_df["收盘"]
+        
+        # 计算核心均线
+        ma5 = close_series.head(5).mean()
+        ma10 = close_series.head(10).mean()
+        ma20 = close_series.head(20).mean()
+        
+        # 计算支撑压力位
+        support_1 = kline_df.head(20)["最低"].min()  # 20日低点强支撑
+        support_2 = ma20  # 20日线支撑
+        pressure_1 = kline_df.head(20)["最高"].max()  # 20日高点强压力
+        pressure_2 = kline_df.head(60)["最高"].max()  # 60日前高压力
+
+        # 3. 趋势判断
+        trend = "震荡"
+        if latest_price > ma5 and ma5 > ma10 and ma10 > ma20:
+            trend = "上升趋势"
+        elif latest_price < ma5 and ma5 < ma10 and ma10 < ma20:
+            trend = "下降趋势"
+
+        # 4. 资金活跃度判断
+        activity = "低活跃度"
+        if turnover_rate > 10:
+            activity = "超高换手，资金博弈剧烈"
+        elif turnover_rate > 5:
+            activity = "高活跃度，资金承接强"
+        elif turnover_rate > 2:
+            activity = "中等活跃度，流动性充足"
+
+        # 5. 生成操作建议
+        if trend == "上升趋势":
+            if latest_price <= ma10:
+                operate_suggest = "✅ 低吸机会"
+                position = "建议2-3成仓，回踩均线分批买入"
+                stop_profit = f"第一止盈位 {round(pressure_1,2)} 元，第二止盈位 {round(pressure_2,2)} 元"
+                stop_loss = f"止损位 {round(support_1*0.97,2)} 元（有效跌破强支撑无条件离场）"
+            else:
+                operate_suggest = "⚠️ 观望为主，不追高"
+                position = "持仓者可持有，未持仓者不追高，等待回踩"
+                stop_profit = f"止盈位 {round(pressure_1,2)} 元，到价分批减仓"
+                stop_loss = f"止损位 {round(ma20,2)} 元，跌破离场"
+        elif trend == "下降趋势":
+            operate_suggest = "❌ 不建议抄底，观望为主"
+            position = "持仓者逢高减仓，未持仓者不抄底，下降趋势不言底"
+            stop_profit = f"反弹压力位 {round(ma10,2)} 元，到价减仓"
+            stop_loss = f"强支撑 {round(support_1,2)} 元，跌破继续下行风险极大"
+        else:
+            operate_suggest = "🔄 震荡行情，高抛低吸做T为主"
+            position = "总仓位不超4成，底仓不动，用小仓位做T"
+            stop_profit = f"高抛位 {round(pressure_1,2)} 元，到价卖出做T仓位"
+            stop_loss = f"低吸位 {round(support_1,2)} 元，企稳买入做T仓位"
+
+        # 6. 风险提示
+        risk_tip = []
+        if change_percent >= 9:
+            risk_tip.append("当日大涨，谨防次日冲高回落，不追高")
+        if change_percent <= -9:
+            risk_tip.append("当日大跌，资金出逃，不抄底")
+        if turnover_rate > 15:
+            risk_tip.append("超高换手率，高位分歧加剧，波动风险极大")
+        if latest_price >= pressure_2 * 0.95:
+            risk_tip.append("临近历史高位，抛压大，谨慎追高")
+        if not risk_tip:
+            risk_tip.append("无极端风险，严守操作纪律即可")
+        risk_tip = "；".join(risk_tip)
+
+        # 组装返回结果
+        result = {
+            "基础信息": {"股票名称": stock_name, "股票代码": code, "最新价": round(latest_price,2), "涨跌幅": f"{change_percent}%"},
+            "行情核心数据": {"换手率": f"{turnover_rate}%", "成交额": f"{round(amount/100000000,2)} 亿", "日内最高": round(high,2), "日内最低": round(low,2)},
+            "趋势与活跃度": {"当前趋势": trend, "资金活跃度": activity},
+            "关键点位": {"强支撑位": round(support_1,2), "均线支撑位": round(support_2,2), "第一压力位": round(pressure_1,2), "前高压力位": round(pressure_2,2)},
+            "操作建议": {"操作评级": operate_suggest, "仓位建议": position, "止盈目标": stop_profit, "止损红线": stop_loss},
+            "风险提示": risk_tip
+        }
+        return result, True
+    except Exception as e:
+        return f"代码错误或数据获取失败，请检查股票代码是否正确，错误信息：{str(e)}", False
+
+# 页面交互
+col1, col2 = st.columns([3,1])
+with col1:
+    stock_code = st.text_input("请输入A股股票代码（如000547、600989）", max_chars=6, placeholder="仅输入6位数字代码即可")
+with col2:
+    st.write("")
+    st.write("")
+    analyze_btn = st.button("🚀 一键分析", use_container_width=True)
+
+# 执行分析
+if analyze_btn and stock_code:
+    if len(stock_code) != 6 or not stock_code.isdigit():
+        st.error("请输入正确的6位数字A股股票代码！")
+    else:
+        with st.spinner("正在获取实时数据，生成分析报告..."):
+            result, status = get_stock_analysis(stock_code)
+            if status:
+                # 分模块展示结果
+                st.divider()
+                st.subheader(f"📊 {result['基础信息']['股票名称']}（{result['基础信息']['股票代码']}）实时分析报告")
+                
+                # 基础行情卡片
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("最新价", result["基础信息"]["最新价"], result["基础信息"]["涨跌幅"])
+                with col2:
+                    st.metric("当前趋势", result["趋势与活跃度"]["当前趋势"])
+                with col3:
+                    st.metric("操作评级", result["操作建议"]["操作评级"])
+                with col4:
+                    st.metric("换手率", result["行情核心数据"]["换手率"])
+                
+                # 关键点位表格
+                st.divider()
+                st.subheader("🎯 关键买卖点位（直接照着操作）")
+                point_df = pd.DataFrame({
+                    "点位类型": ["强支撑位（低吸）", "均线支撑位", "第一压力位（止盈/高抛）", "前高压力位"],
+                    "价格(元)": [
+                        result["关键点位"]["强支撑位"],
+                        result["关键点位"]["均线支撑位"],
+                        result["关键点位"]["第一压力位"],
+                        result["关键点位"]["前高压力位"]
+                    ]
+                })
+                st.dataframe(point_df, use_container_width=True, hide_index=True)
+
+                # 操作建议
+                st.divider()
+                st.subheader("📌 极简操作建议")
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.write("**仓位建议**：", result["操作建议"]["仓位建议"])
+                    st.write("**止盈目标**：", result["操作建议"]["止盈目标"])
+                with col2:
+                    st.write("**止损红线**：", result["操作建议"]["止损红线"])
+                    st.write("**资金活跃度**：", result["趋势与活跃度"]["资金活跃度"])
+
+                # 风险提示
+                st.divider()
+                st.warning(f"⚠️ 风险提示：{result['风险提示']}")
+                st.caption("【免责声明】本工具分析结果仅供参考，不构成任何投资建议，股市有风险，投资需谨慎")
+            else:
+                st.error(result)
+
+# 底部说明
+st.divider()
+st.caption("数据来源：东方财富网 | 实时更新 | 仅支持A股主板、创业板、科创板股票")
